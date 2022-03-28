@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:redis="http://www.mulesoft.org/schema/mule/redis" xmlns:batch="http://www.mulesoft.org/schema/mule/batch"
+	xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:os="http://www.mulesoft.org/schema/mule/os" xmlns:snowflake="http://www.mulesoft.org/schema/mule/snowflake" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/snowflake http://www.mulesoft.org/schema/mule/snowflake/current/mule-snowflake.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.mulesoft.org/schema/mule/redis http://www.mulesoft.org/schema/mule/redis/current/mule-redis.xsd">
+	<snowflake:snowflake-config name="Snowflake_Config" doc:name="Snowflake Config" doc:id="4e8dbd67-47ff-4790-aa51-b1b36caeac83" >
+		<snowflake:snowflake-connection accountName="${snowflakeAccountName}" warehouse="${snowflakeWarehouse}" database="${snowflakeDatabase}" schema="${snowflakeSchema}" user="${snowflakeUser}" password="${snowflakePassword}" role="${snowflakeRole}" />
+	</snowflake:snowflake-config>
+	<os:object-store name="Watermark_store" doc:name="Object store" doc:id="5814dd4a-ae59-4187-b0d8-dc4b60a0c4f4" persistent="false" config-ref="ObjectStore_Config"/>
+	<os:object-store name="Batch_store" doc:name="Object store" doc:id="67324712-2752-4270-bcdb-76e4fb4eb8b4" persistent="false" config-ref="ObjectStore_Config"/>
+	<vm:config name="VM_Config" doc:name="VM Config" doc:id="efa246a7-b272-4fec-995e-f7393a54c19f" >
+		<vm:queues >
+			<vm:queue queueName="publishQueue" />
+			<vm:queue queueName="customerQueue" />
+		</vm:queues>
+	</vm:config>
+	<os:object-store name="Batch_Error_store" doc:name="Object store" doc:id="285a8a77-faf8-42df-826f-ee1619cc3815" persistent="false" config-ref="ObjectStore_Config"/>
+	<!-- <os:config name="ObjectStore_Config" doc:name="ObjectStore Config" doc:id="29f48257-a064-435f-9d80-9219b005852f" >
+		<redis:nonclustered-connection password="123456"/>
+	</os:config> -->
+	<os:config name="ObjectStore_Config" doc:name="ObjectStore Config" doc:id="1e677570-58d3-41a1-9b5c-c76a8190b1be" />
+	<configuration-properties doc:name="Configuration properties" doc:id="b3419fe0-8672-478e-8f35-676b7d48230c" file="common.properties" />
+	<flow name="batchprocesstemplateFlow" doc:id="675f3910-2160-4b86-a186-3131fc0594d8" initialState="started">
+		<scheduler doc:name="Scheduler" doc:id="da17a7f4-e494-4c3f-9867-b115e0b5b075" >
+			<scheduling-strategy >
+				<fixed-frequency timeUnit="MINUTES"/>
+			</scheduling-strategy>
+		</scheduler>
+		<os:retrieve doc:name="Retrieve Batch Status" doc:id="f4d08235-8b66-49ad-87fc-575e17377b08" key="batch_status_key" objectStore="Batch_store">
+			<os:default-value ><![CDATA[#[{
+	"status":"",
+	"lastRun":""
+}]]]></os:default-value>
+		</os:retrieve>
+		<logger level="INFO" doc:name="Log Batch Status" doc:id="03d8d6ce-91db-4fd5-8aef-940086f99c6d" message="Batch Status is #[payload]"/>
+		<validation:is-false doc:name="Is false" doc:id="d4af9820-40a8-428c-890d-96b81e4e15f7" expression='#[(payload.status == "running")]' message="Previous Job is still running. Skipping this execution"/>
+		<os:store doc:name="Store" doc:id="a2ac7180-683b-4747-bdf1-3e280a9a9092" key="batch_status_key" objectStore="Batch_store">
+			<os:value ><![CDATA[#[{
+	"status":"running",
+	"lastRun":now() as String
+}]]]></os:value>
+		</os:store>
+		<vm:publish doc:name="Publish" doc:id="2b954a75-09ea-48bc-b16a-e0c158cb541f" config-ref="VM_Config" sendCorrelationId="ALWAYS" queueName="publishQueue"/>
+		<logger level="INFO" doc:name="Logger" doc:id="a3cadc74-afec-4357-8be5-e1aad321c1ee" message="Batch Execution started"/>
+		
+		<error-handler >
+			<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="13be7415-325e-41ae-8984-a6c20be72fe1" >
+				<logger level="INFO" doc:name="Logger" doc:id="320dee99-5e62-4b0b-982d-c70ac626717a" message="#[error.description]"/>
+			</on-error-continue>
+		</error-handler>
+	</flow>
+	<flow name="batchprocesstemplateFlow1" doc:id="7cf56479-fa04-4f42-98ae-d9be23869a6d" >
+		<vm:listener queueName="publishQueue" doc:name="Listener" doc:id="fe7115d0-e8a0-4d1f-9274-01486465be03" config-ref="VM_Config"/>
+		<set-variable value="#[dw::util::Timer::currentMilliseconds()]" doc:name="Set Start Time" doc:id="69548164-c4b1-4b6a-96b9-0a87040e0dd0" variableName="startTime"/>
+		<logger level="INFO" doc:name="Log Start Time" doc:id="eebd767f-fde6-45e1-935b-ff3059ecba52" message="Initializing batch job #[now() as String]"/>
+		<os:retrieve doc:name="Retrieve Watermark" doc:id="6d1df538-aae2-410f-ae1b-5962d53fa684" key="customer_key" objectStore="Watermark_store">
+			<os:default-value><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+'customerkey':1,
+'uttikey':1
+}]]]></os:default-value>
+		</os:retrieve>
+		<logger level="INFO" doc:name="Watermark Customer key" doc:id="23027400-0365-48b4-b6a2-159216263720" message="Watermark Customer key #[payload.customerkey]"/>
+		<logger level="INFO" doc:name="Logger" doc:id="3867dbd0-0cb9-42c0-8216-357cc3780ab8" message="select * from SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.CUSTOMER where C_CUSTKEY &gt; #[payload.customerkey] limit 5"/>
+		<snowflake:select doc:name="Select 500 records from Snowflake table" doc:id="8e6056dc-fb85-49ac-a4f4-6cd85ad668cb" config-ref="Snowflake_Config" queryTimeout="30">
+			<snowflake:sql ><![CDATA[select * from SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.CUSTOMER where C_CUSTKEY > :custkey limit 5]]></snowflake:sql>
+			<snowflake:input-parameters ><![CDATA[#[{
+	'custkey':payload.customerkey
+}]]]></snowflake:input-parameters>
+		</snowflake:select>
+		<!--  <logger level="INFO" doc:name="Maximum Customer Key Value retrieved" doc:id="3577533f-6061-4604-a13e-2e7e0926d5bd" message="#[max(payload map $.C_CUSTKEY)]"/> -->
+		<set-variable value="#[max(payload map $.C_CUSTKEY)]" doc:name="maxCustKey" doc:id="96a5ef5a-ca9d-44b6-a4c2-2f5e3cd6b81d" variableName="maxCustKey"/>
+		<batch:job jobName="publish-to-vm-Batch_Job" doc:id="11940ab9-b4ca-4982-9913-584b5a8ec726" maxFailedRecords="-1" blockSize="5">
+			<batch:process-records >
+				<batch:step name="Transform_And_Publish_Record" doc:id="878b1914-45eb-4da8-8931-ab4d651dcf90" acceptExpression="#[payload.C_MKTSEGMENT != 'HOUSEHOLD']">
+					<set-payload value="#[output application/json --- payload]" doc:name="Set Payload to JSON" doc:id="74df1f8e-3755-4cdd-b77e-62f67897b8fe" />
+					<vm:publish doc:name="Publish to Customer Queue" doc:id="53f499d8-70d6-4d8f-9313-4d63890db83c" config-ref="VM_Config" sendCorrelationId="ALWAYS" queueName="customerQueue"/>
+				</batch:step>
+				<batch:step name="Raise_Error_For_HouseHold_Segment" doc:id="89be7525-6564-4799-89ea-8fc4d8b11dea" acceptExpression="#[payload.C_MKTSEGMENT == 'HOUSEHOLD']">
+					<logger level="INFO" doc:name="Logger" doc:id="5830afff-9771-4669-9b25-c34ec79188a2" message="Found House Hold Market Segment, raising error"/>
+					<raise-error doc:name="Raise error" doc:id="7bf66aeb-821b-431b-a9f7-189dc318c409" type="APP:MKT_SEGMENT" description="Market Segment is set to House Hold"/>
+				</batch:step>
+				<batch:step name="Process_Errors" doc:id="3ac1e2fd-2935-4ba0-8b04-bd7ac1e66d8d" acceptPolicy="ONLY_FAILURES">
+					<logger level="INFO" doc:name="Logger" doc:id="0a91b279-58ab-4025-86d6-65589659aea8" message="Processing failed records #[Batch::getStepExceptions()], #[payload]"/>
+					<os:store doc:name="Error_Store" doc:id="eca18745-512b-4e2f-8791-13c8fb2ae7ad" key="payload.C_CUSTKEY" objectStore="Batch_Error_store"/>
+				</batch:step>
+			</batch:process-records>
+			<batch:on-complete >
+				<os:store doc:name="Update Job Status To Complete" doc:id="fedda31c-1cf3-48c5-9ed8-62fbde80bac1" key="batch_status_key" objectStore="Batch_store">
+					<os:value ><![CDATA[#[{
+	"status":"completed",
+	"lastRun":now() as String
+}]]]></os:value>
+				</os:store>
+				<os:store doc:name="Update watermark" doc:id="3fff3093-eb40-4592-94ed-a4f93d993816" key="customer_key" objectStore="Watermark_store">
+			<os:value><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+'customerkey':vars.maxCustKey,
+'uttikey':vars.maxCustKey
+}]]]></os:value>
+		</os:store>
+				<logger level="INFO" doc:name="Log Batch Result" doc:id="89ad6086-a399-4eb2-a459-4037b784ff89" message="Total Time Taken #[dw::util::Timer::currentMilliseconds() - vars.startTime], BatchResult #[output application/json --- payload]"/>
+			</batch:on-complete>
+		</batch:job>
+		<error-handler >
+			<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="7cad1436-1ae9-442b-b57c-2cf71eb86a85" >
+				<logger level="INFO" doc:name="Logger" doc:id="21b11da7-cb84-475f-b101-7ae27cfce891" message="#[error.description]"/>
+			</on-error-continue>
+		</error-handler>
+	</flow>
+	<flow name="batchprocesstemplateFlow2" doc:id="8d97b392-8e8d-42fd-b91f-f9091ddc01f6" >
+		<vm:listener queueName="customerQueue" doc:name="Listener" doc:id="497d37c1-c18c-40f0-a6cc-2d9b4f0b6ed9" config-ref="VM_Config"/>
+		<logger level="INFO" doc:name="Logger" doc:id="8c86cc4b-ba18-4722-ba6f-83c3ee038405" message="Payload from Customer #[payload]"/>
+		<error-handler >
+			<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="f872f088-d31c-4bad-863e-f9a71f288143" >
+				<logger level="INFO" doc:name="Logger" doc:id="33d29590-a803-487d-bdb7-f17ceb627ee0" />
+			</on-error-continue>
+		</error-handler>
+	</flow>
+	<flow name="batchprocesstemplateFlow3" doc:id="d8c4772f-a6ce-47b9-bfed-6ddbee455810" >
+		<scheduler doc:name="Scheduler" doc:id="e27c9d93-040d-4dd8-a755-ab1f76a48a55" >
+			<scheduling-strategy >
+				<fixed-frequency frequency="2" timeUnit="MINUTES"/>
+			</scheduling-strategy>
+		</scheduler>
+		<logger level="INFO" doc:name="Logger" doc:id="528e856f-bb91-4f91-9091-780fe5c29ebe" message="Retrieving error messages"/>
+		<os:retrieve-all doc:name="Retrieve all" doc:id="2ef645b1-84d1-4015-adda-ca5ed294dd2d" objectStore="Batch_Error_store"/>
+		<logger level="INFO" doc:name="Logger" doc:id="9fa284df-40d2-4163-b91d-4f075cbb692b" message="#[payload]"/>
+		<foreach doc:name="For Each" doc:id="0e337092-46f5-479b-b5b0-95dfebb584f1" collection="#[dw::core::Objects::entrySet(payload)]">
+			<logger level="INFO" doc:name="Logger" doc:id="47a26881-5958-4329-9391-703d5059c0fc" message="#[output application/json --- payload]"/>
+		</foreach>
+		<error-handler >
+			<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="793dc077-e506-44a3-af75-6a0c0ecad97c" >
+				<logger level="INFO" doc:name="Logger" doc:id="2e2bef9b-33b2-480a-a8e1-cf64433d7085" />
+			</on-error-continue>
+		</error-handler>
+	</flow>
+</mule>
